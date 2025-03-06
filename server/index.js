@@ -50,6 +50,8 @@ app.use(
     origin: [
       "http://localhost:3000/",
       "http://localhost:3000",
+      "http://127.0.0.1:5500/",
+      "http://127.0.0.1:5500",
       "https://admin.socket.io",
     ],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -68,6 +70,8 @@ const io = require("socket.io")(server, {
     origin: [
       "http://localhost:3000/",
       "http://localhost:3000",
+      "http://127.0.0.1:5500/",
+      "http://127.0.0.1:5500",
       "https://admin.socket.io",
     ],
     allowedHeaders: ["Content-Type", "application/json"],
@@ -141,7 +145,7 @@ async function runApp() {
   app.use("/api/chatbots", chatBotRoutes);
   app.use("/api/channels", channelRoutes);
   app.use("/api", messagesRoutes);
-  app.use("/static", express.static(path.join(__dirname, "public")));
+  app.use("/static", express.static(path.join(__dirname, "../public")));
 
   initPubSub();
 
