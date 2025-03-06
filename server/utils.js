@@ -76,24 +76,48 @@ const createPrivateRoom = async (user1, user2) => {
 
 
 const getMessages = async (roomId = "0", offset = 0, size = 50) => {
-  /**
-   * Logic:
-   * 1. Check if room with id exists
-   * 2. Fetch messages from last hour
-   **/
   const roomKey = `room:${roomId}`;
-  const roomExists = await exists(roomKey);
-  if (!roomExists) {
-    return [];
-  } else {
-    return new Promise((resolve, reject) => {
-      redisClient.zrevrange(roomKey, offset, offset + size, (err, values) => {
-        if (err) {
-          reject(err);
-        }
-        resolve(values.map((val) => JSON.parse(val)));
+  
+  try {
+    // First check Redis cache
+    const values = await new Promise((resolve, reject) => {
+      redisClient.zrevrange(roomKey, offset, offset + size - 1, (err, values) => {
+        if (err) return reject(err);
+        resolve(values);
       });
     });
+    
+    // If we have messages in Redis, return them
+    if (values && values.length > 0) {
+      return values.map(val => JSON.parse(val));
+    }
+    
+    // If Redis is empty or key doesn't exist, fetch from MongoDB
+    const messagesFromDB = await Message.find({ channel: roomId })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+    
+    if (messagesFromDB.length > 0) {
+      // Store messages in Redis (score = createdAt timestamp)
+      const pipeline = redisClient.pipeline();
+      messagesFromDB.forEach((msg) => {
+        pipeline.zadd(roomKey, msg.createdAt.getTime() / 1000, JSON.stringify(msg));
+      });
+      
+      await pipeline.exec();
+      redisClient.expire(roomKey, 3600); // Set 1-hour expiration
+      
+      // Return the paginated results
+      return messagesFromDB.slice(offset, offset + size);
+    }
+    
+    // No messages found in either Redis or MongoDB
+    return [];
+    
+  } catch (error) {
+    console.error("Error fetching messages:", error);
+    throw error;
   }
 };
 

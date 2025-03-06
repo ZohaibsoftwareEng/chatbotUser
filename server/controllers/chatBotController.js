@@ -42,7 +42,7 @@ exports.getUserChatBots = async (req, res) => {
         const chatBots = await ChatBot.find({ userId: req.params.userId })
             .populate({
                 path: 'subscribers',
-                select: 'name email summary hasNotification messages createdAt' // excluding password
+                select: 'name email summary hasNotification messages createdAt color' 
             });
         res.status(200).json(chatBots);
     } catch (error) {

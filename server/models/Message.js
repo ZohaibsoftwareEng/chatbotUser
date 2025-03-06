@@ -7,7 +7,9 @@ const MessageSchema = new mongoose.Schema({
   type: { type: String, required: true, enum: ['Simple', 'Rich', 'File'] },
   files: [{ type: String }],
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
+  updatedAt: { type: Date, default: Date.now },
+  upvotes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  downvotes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
 });
 
 module.exports = mongoose.model('Message', MessageSchema);

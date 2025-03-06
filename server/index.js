@@ -1,24 +1,21 @@
-// @ts-check
 const express = require("express");
 const bcrypt = require("bcrypt");
 const session = require("express-session");
 const bodyParser = require("body-parser");
-/** @ts-ignore */
 const randomName = require("node-random-name");
 let RedisStore = require("connect-redis")(session);
 const path = require("path");
 const fs = require("fs").promises;
-// On your Express server
 const cors = require("cors");
 const { instrument } = require("@socket.io/admin-ui");
 const { UserChat, Room } = require("./models/UserChat");
-const ChatBot = require('./models/ChatBot')
 const GroupChat = require("./models/GroupChat");
 const userRoutes = require("./routes/userRoutes");
 const chatBotRoutes = require("./routes/chatBotRoutes");
 const channelRoutes = require("./routes/channelRoutes");
-const Message = require("./models/Message")
-const User = require("./models/User")
+const messagesRoutes = require("./routes/messageRoutes");
+const Message = require("./models/Message");
+const User = require("./models/User");
 
 const {
   client: redisClient,
@@ -44,9 +41,7 @@ const {
   sanitise,
   getMessages,
 } = require("./utils");
-const { createDemoData } = require("./demo-data");
 const { PORT, SERVER_ID, connectDB } = require("./config");
-const { subscribe } = require("diagnostics_channel");
 const Channel = require("./models/Channel");
 
 const app = express();
@@ -93,7 +88,6 @@ const sessionMiddleware = session({
 });
 
 const auth = (req, res, next) => {
-  req.session.user = {id:"67c0055d2003709bebc8f3df",username:"zohaibhassan"}
   if (!req.session.user) {
     return res.sendStatus(403);
   }
@@ -129,15 +123,8 @@ const initPubSub = () => {
   sub.subscribe("MESSAGES");
 };
 
-
 (async () => {
   await runRedisAuth();
-  // const totalUsersKeyExist = await exists("total_users");
-  // if (!totalUsersKeyExist) {
-  //   await set("total_users", 0);
-  //   await set(`room:${0}:name`, "General");
-  //   await createDemoData();
-  // }
   runApp();
 })();
 
@@ -147,16 +134,18 @@ async function runApp() {
     .then((x) => JSON.parse(x.toString()));
 
   app.use(bodyParser.json());
+  app.use(sessionMiddleware);
+ 
   app.use("/", express.static(path.dirname(__dirname) + "/client/build"));
   app.use("/api/users", userRoutes);
   app.use("/api/chatbots", chatBotRoutes);
   app.use("/api/channels", channelRoutes);
+  app.use("/api", messagesRoutes);
   app.use("/static", express.static(path.join(__dirname, "public")));
 
   initPubSub();
 
   /** Store session in redis. */
-  app.use(sessionMiddleware);
   io.use((socket, next) => {
     /** @ts-ignore */
     sessionMiddleware(socket.request, socket.request.res || {}, next);
@@ -169,13 +158,13 @@ async function runApp() {
   });
 
   io.on("connection", async (socket) => {
-    console.log('runing app')
-    socket.request.session.user = {id:"67c0055d2003709bebc8f3df",username:"zohaibhassan" }
+    socket.request.session.user = {
+      id: "67c0055d2003709bebc8f3df",
+      username: "zohaibhassan",
+    };
     if (socket.request.session.user === undefined) {
       return;
-    } 
-    console.log('runing app2')
-
+    }
 
     const userId = "67c0055d2003709bebc8f3df";
     // await sadd("online_users", userId);
@@ -204,52 +193,57 @@ async function runApp() {
        * }} message
        **/
       async (message) => {
-        /** Make sure nothing illegal is sent here. */
         message = { ...message, message: sanitise(message.message) };
-        /**
-         * The user might be set as offline if he tried to access the chat from another tab, pinging by message
-         * resets the user online status
-         */
-        // await sadd("online_users", message.from);
-        /** We've got a new message. Store it in db, then send back to the room. */
-        const messageString = JSON.stringify(message);
         const roomKey = `room:${message.roomId}`;
-        /**
-         * It may be possible that the room is private and new, so it won't be shown on the other
-         * user's screen, check if the roomKey exist. If not then broadcast message that the room is appeared
-         */
-        // console.log('sending message socket',message)
-        const reqChannel = await Channel.findOne({displayName:message.roomId})
-        console.log(reqChannel,'channel')
+    
+        const reqChannel = await Channel.findOne({
+          displayName: message.roomId,
+        });
+    
         const messageToSave = {
-          editedBy:message.from,
-          channel:reqChannel._id,
-          message:message.message,
-          type:'Simple'
+          editedBy: message.from,
+          channel: reqChannel ? reqChannel._id : null,
+          message: message.message,
+          type: "Simple",
+        };
+    
+        try {
+          const savedMessage = new Message(messageToSave);
+          await savedMessage.save();
+    
+          const isPrivate = !(await exists(`${roomKey}:name`));
+          const roomHasMessages = await exists(roomKey);
+    
+          if (isPrivate && !roomHasMessages) {
+            const ids = message.roomId.split(":");
+            const msg = {
+              id: message.roomId,
+              names: [
+                await hmget(`user:${ids[0]}`, "username"),
+                await hmget(`user:${ids[1]}`, "username"),
+              ],
+            };
+    
+            publish("show.room", msg);
+            socket.broadcast.emit(`show.room`, msg);
+          }
+    
+          // Add message ID before storing it
+          const broadcastMessage = { ...message, id: savedMessage._id };
+          await zadd(roomKey, "" + message.date, JSON.stringify(broadcastMessage));
+    
+          publish("message", broadcastMessage);
+          io.to(roomKey).emit("message", broadcastMessage);
+        } catch (error) {
+          if (error.name === "ValidatorError" && error.path === "channel") {
+            console.error("Channel is required:", error.message);
+          } else {
+            console.error("An error occurred:", error);
+          }
         }
-        const savedMessage = new Message(messageToSave);
-        await savedMessage.save();
-        const isPrivate = !(await exists(`${roomKey}:name`));
-        const roomHasMessages = await exists(roomKey);
-        if (isPrivate && !roomHasMessages) {
-          const ids = message.roomId.split(":");
-          const msg = {
-            id: message.roomId,
-            names: [
-              await hmget(`user:${ids[0]}`, "username"),
-              await hmget(`user:${ids[1]}`, "username"),
-            ],
-          };
-          console.log(msg,'msg printing')
-          publish("show.room", msg);
-          socket.broadcast.emit(`show.room`, msg);
-          console.log(msg,'message to be saved')
-        }
-        await zadd(roomKey, "" + message.date, messageString);
-        publish("message", message);
-        io.to(roomKey).emit("message", message);
       }
     );
+    
     socket.on("disconnect", async () => {
       await srem("online_users", userId);
       const disconnectMsg = {
@@ -282,29 +276,31 @@ async function runApp() {
   /** Login/register login */
   // @ts-ignore
   app.post("/login", async (req, res) => {
-    console.log('login attempt')
     const { email, password } = req.body;
     const usernameKey = makeUsernameKey(email);
     const userExists = await exists(usernameKey);
-      
+
     if (!userExists) {
       // Check if user exists in MongoDB even if not in Redis
       const existingUser = await User.findOne({ email });
-      
+
       if (existingUser) {
         // User exists in MongoDB but not in Redis - sync them
         const mongoId = existingUser._id.toString();
         const userKey = `user:${mongoId}`;
-        
+
         // Add to Redis
         await set(usernameKey, userKey);
         await hmset(userKey, [
-          "username", email, 
-          "password", existingUser.password,
-          "id", mongoId
+          "username",
+          email,
+          "password",
+          existingUser.password,
+          "id",
+          mongoId,
         ]);
         await sadd(`user:${mongoId}:rooms`, `${0}`); // Default room
-        
+
         // Check password
         if (await bcrypt.compare(password, existingUser.password)) {
           /** @ts-ignore */
@@ -314,61 +310,70 @@ async function runApp() {
           return res.status(401).json({ message: "Invalid password" });
         }
       }
-      
+
       // Truly new user - Create in Redis and MongoDB
       const hashedPassword = await bcrypt.hash(password, 10);
-      
+
       // Create MongoDB user first to get a proper ObjectId
-      const newUser = new User({ 
-        email, 
+      const newUser = new User({
+        email,
         password: hashedPassword,
-        color: '#' + Math.floor(Math.random()*16777215).toString(16) // Generate random color
+        color: "#" + Math.floor(Math.random() * 16777215).toString(16), // Generate random color
       });
       await newUser.save();
-      
+
       const mongoId = newUser._id.toString(); // Get MongoDB ObjectId as string
       const userKey = `user:${mongoId}`;
-          
+
       // Now save in Redis with MongoDB's ID
       await set(usernameKey, userKey);
       await hmset(userKey, [
-        "email", email, 
-        "password", hashedPassword,
-        "id", mongoId
+        "email",
+        email,
+        "password",
+        hashedPassword,
+        "id",
+        mongoId,
       ]);
       await sadd(`user:${mongoId}:rooms`, `${0}`); // Default room
-          
+
       /** @ts-ignore */
       req.session.user = { id: mongoId, email };
+    
       return res.status(201).json({ id: mongoId, email });
     } else {
       // Existing User - Verify Password
       const userKey = await get(usernameKey);
       const mongoId = userKey.split(":").pop(); // Extract ID from Redis key
       const data = await hgetall(userKey);
-      
+
       // Update Redis entry to include ID if it's not already there
       if (!data.id) {
         await hmset(userKey, ["id", mongoId]);
       }
-          
+
       if (await bcrypt.compare(password, data.password)) {
         // Use mongoose.Types.ObjectId to convert string to ObjectId when querying
         const user = await User.findById(mongoId);
-            
+
         if (!user) {
-          return res.status(404).json({ message: "User not found in database" });
+          return res
+            .status(404)
+            .json({ message: "User not found in database" });
         }
-            
+
         /** @ts-ignore */
         req.session.user = { id: user._id.toString(), email: user.email };
-        console.log('session user ', req.session.user)
-        return res.status(200).json({ id: user._id.toString(), email: user.email });
+        
+
+        return res
+          .status(200)
+          .json({ id: user._id.toString(), email: user.email });
       } else {
         return res.status(401).json({ message: "Invalid password" });
       }
     }
-        
+
     return res.status(401).json({ message: "Invalid username or password" });
   });
   // @ts-ignore
@@ -376,18 +381,16 @@ async function runApp() {
     req.session.destroy(() => {});
     return res.sendStatus(200);
   });
-  
+
   /**
    * Create a private room and add users to it
    */
   // @ts-ignore
-  app.post("/room",  async (req, res) => {
+  app.post("/room", async (req, res) => {
     const { user1, user2 } = {
-      user1: (req.body.user1),
-      user2: (req.body.user2),
+      user1: req.body.user1,
+      user2: req.body.user2,
     };
-    console.log('making room attempt with',user1,user2)
-
 
     const [result, hasError] = await createPrivateRoom(user1, user2);
     if (hasError) {
@@ -425,74 +428,34 @@ async function runApp() {
     }
   });
 
-  /** Check which users are online. */
-  // @ts-ignore
-  // app.get(`/users/online`, auth, async (req, res) => {
-  //   const onlineIds = await smembers(`online_users`);
-  //   const users = {};
-  //   for (let onlineId of onlineIds) {
-  //     const user = await hgetall(`user:${onlineId}`);
-  //     users[onlineId] = {
-  //       id: onlineId,
-  //       username: user.username,
-  //       online: true,
-  //     };
-  //   }
-  //   return res.send(users);
-  // });
-
-  /** Retrieve the user info based on ids sent */
-  // @ts-ignore
-  // app.get(`/users`, async (req, res) => {
-  //   /** @ts-ignore */
-  //   /** @type {string[]} */ const ids = req.query.ids;
-  //   if (typeof ids === "object" && Array.isArray(ids)) {
-  //     /** Need to fetch */
-  //     const users = {};
-  //     for (let x = 0; x < ids.length; x++) {
-  //       /** @type {string} */
-  //       const id = ids[x];
-  //       const user = await hgetall(`user:${id}`);
-  //       users[id] = {
-  //         id: id,
-  //         username: user.username,
-  //         online: !!(await sismember("online_users", id)),
-  //       };
-  //     }
-  //     return res.send(users);
-  //   }
-  //   return res.sendStatus(404);
-  // });
 
   app.get(`/users`, async (req, res) => {
     try {
       // Fetch all users from MongoDB
       const usersData = await User.find({}, "_id username");
-  
+
       // Fetch all online users from Redis in one go
       const onlineUsers = new Set(await smembers("online_users"));
-  
+
       // Create response object
       const users = {};
-  
+
       for (const user of usersData) {
         const userId = user._id.toString();
-  
+
         users[userId] = {
           id: userId,
           username: user.email,
           online: onlineUsers.has(userId), // Check if the user is online
         };
       }
-  
+
       return res.send(users);
     } catch (error) {
       console.error("Error fetching users:", error);
       return res.sendStatus(500);
     }
   });
-  
-
 
   /**
    * Get rooms for the selected user.
@@ -563,6 +526,7 @@ async function runApp() {
       return res.json({ messages });
     } catch (error) {
       console.error("Error fetching messages:", error);
+
       return res.status(500).json({ error: "Failed to fetch messages" });
     }
   });
@@ -593,7 +557,6 @@ async function runApp() {
     }
   });
 
- 
   if (process.env.PORT) {
     server.listen(+PORT, "0.0.0.0", () =>
       console.log(`Listening on ${PORT}...`)
