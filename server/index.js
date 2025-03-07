@@ -197,6 +197,7 @@ async function runApp() {
        * }} message
        **/
       async (message) => {
+        console.log('message recieved ',message)
         message = { ...message, message: sanitise(message.message) };
         const roomKey = `room:${message.roomId}`;
     
